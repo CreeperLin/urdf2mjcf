@@ -36,10 +36,6 @@ def iter_meshes(
             yield visual_mesh, (None, None)
 
         else:
-            if visual_link is None or collision_link is None:
-                if visual_link is not None or collision_link is not None:
-                    raise ValueError("Visual and collision links must be present together.")
-                continue
             visual_mesh = get_mesh(visual_link)
             collision_mesh = get_mesh(collision_link)
 

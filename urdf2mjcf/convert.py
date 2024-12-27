@@ -167,14 +167,14 @@ def get_max_foot_distance(root: ET.Element) -> float:
     return recursive_search(worldbody)
 
 
-def add_root_body(root: ET.Element) -> None:
+def add_root_body(root: ET.Element, fix_base_link=False) -> None:
     worldbody = root.find("worldbody")
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
 
     # Calculate the initial height
     foot_distance = get_max_foot_distance(root)
-    epsilon = 0.01
+    epsilon = 0.5 if fix_base_link else 0.01
     initial_height = foot_distance + epsilon
 
     # Create a root body
@@ -188,11 +188,12 @@ def add_root_body(root: ET.Element) -> None:
     )
 
     # Add a freejoint
-    ET.SubElement(
-        root_body,
-        "freejoint",
-        attrib={"name": "root"},
-    )
+    if not fix_base_link:
+        ET.SubElement(
+            root_body,
+            "freejoint",
+            attrib={"name": "root"},
+        )
 
     # Add imu site
     ET.SubElement(
@@ -205,23 +206,12 @@ def add_root_body(root: ET.Element) -> None:
         },
     )
 
-    # Create base body
-    base_body = ET.SubElement(
-        root_body,
-        "body",
-        attrib={
-            "name": "base",
-            "pos": "0 0 0",
-            "quat": "1 0 0 0",
-        },
-    )
-
     # Move existing bodies and geoms under base_body
     elements_to_move = list(worldbody)
     for elem in elements_to_move:
         if elem.tag in {"body", "geom"}:
             worldbody.remove(elem)
-            base_body.append(elem)
+            root_body.append(elem)
     worldbody.append(root_body)
 
 
@@ -286,6 +276,10 @@ def add_actuators(root: ET.Element, no_frc_limit: bool = False) -> None:
         joint_name = joint.attrib.get("name")
         if joint_name is None:
             continue
+        joint_range = joint.attrib.get("range")
+        # print(joint_name, joint_range)
+        if joint_range is None:
+            joint.attrib['range'] = "-2147483648 +2147483648"
 
         # Get joint limits if present
         limit_element = joint.find("limit")
@@ -440,20 +434,19 @@ def add_visual_geom_logic(root: ET.Element) -> None:
             geom.set("class", "visualgeom")
             # Create a new geom element
             new_geom = ET.Element("geom")
-            new_geom.set("type", geom.get("type") or "")
+            new_geom.set("type", geom.get("type", "sphere"))
             new_geom.set("rgba", geom.get("rgba") or "")
 
             # Check if geom has mesh or is a box
             if geom.get("mesh") is None:
-                if geom.get("type") == "box":
-                    new_geom.set("type", "box")
-                    new_geom.set("size", geom.get("size") or "")
+                new_geom.set("size", geom.get("size") or "")
             else:
                 new_geom.set("mesh", geom.get("mesh") or "")
             if geom.get("pos"):
                 new_geom.set("pos", geom.get("pos") or "")
             if geom.get("quat"):
                 new_geom.set("quat", geom.get("quat") or "")
+            new_geom.set("contype", str(0))
 
             # Append the new geom to the body
             index = list(body).index(geom)
@@ -513,6 +506,9 @@ def convert_urdf_to_mjcf(
     camera_height_offset: float = 0.5,
     no_frc_limit: bool = False,
     default_position: Union[List[float], None] = None,
+    fix_base_link: bool = False,
+    cylinder2box: bool = False,
+    use_sensor: bool = True,
 ) -> None:
     """Convert a URDF file to an MJCF file.
 
@@ -550,7 +546,10 @@ def convert_urdf_to_mjcf(
                     temp_mesh_path = temp_dir_path / mesh_path.name
                     try:
                         temp_mesh_path.symlink_to(mesh_path)
-                        mesh_files.append(mesh_path.relative_to(urdf_dir))
+                        if copy_meshes:
+                            import os
+                            rel = Path(os.path.relpath(mesh_path, urdf_dir))
+                            mesh_files.append(rel)
                     except FileExistsError:
                         pass
 
@@ -588,16 +587,31 @@ def convert_urdf_to_mjcf(
                 geom.attrib["density"] = str(0)
                 geom.attrib["group"] = str(1)
 
+        if cylinder2box:
+            for geom in root.iter("geom"):
+                geom_type = geom.get("type", "sphere")
+                if geom_type != 'cylinder':
+                    continue
+                new_type = "box"
+                geom.set("type", new_type)
+                old_size = geom.get("size")
+                if old_size:
+                    sizes = map(float, old_size.split(' '))
+                    r, h = sizes
+                    new_sizes = [r, r, h]
+                    new_size = ' '.join(map(str, new_sizes))
+                    geom.set("size", new_size)
         # Manually set additional options.
         add_default(root)
         add_compiler(root)
         add_option(root)
         add_assets(root)
         add_cameras(root, distance=camera_distance, height_offset=camera_height_offset)
-        add_root_body(root)
+        add_root_body(root, fix_base_link=fix_base_link)
         add_worldbody_elements(root)
         add_actuators(root, no_frc_limit)
-        add_sensors(root)
+        if use_sensor:
+            add_sensors(root)
         add_visual_geom_logic(root)
         if default_position is not None:
             add_default_position(root, default_position)
@@ -605,7 +619,8 @@ def convert_urdf_to_mjcf(
         # Copy mesh files to the output directory.
         if copy_meshes:
             for mesh_file in mesh_files:
-                mjcf_mesh_path = mjcf_path.parent.resolve() / mesh_file
+                mjcf_mesh_file = mesh_file.name
+                mjcf_mesh_path = mjcf_path.parent.resolve() / 'meshes' / mjcf_mesh_file
                 mjcf_mesh_path.parent.mkdir(parents=True, exist_ok=True)
                 urdf_mesh_path = urdf_dir / mesh_file
                 if mjcf_mesh_path != urdf_mesh_path:
