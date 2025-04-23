@@ -168,7 +168,7 @@ def get_max_foot_distance(root: ET.Element) -> float:
     return recursive_search(worldbody)
 
 
-def add_root_body(root: ET.Element, fix_base_link=False) -> None:
+def add_root_body(root: ET.Element, fix_base_link=False, imu_site_name='imu') -> None:
     worldbody = root.find("worldbody")
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
@@ -201,7 +201,7 @@ def add_root_body(root: ET.Element, fix_base_link=False) -> None:
         root_body,
         "site",
         attrib={
-            "name": "imu",
+            "name": imu_site_name,
             "size": "0.01",
             "pos": "0 0 0",
         },
@@ -326,7 +326,7 @@ def add_actuators(root: ET.Element, no_frc_limit: bool = False, actuator_type='m
     root.append(actuator_element)
 
 
-def add_sensors(root: ET.Element) -> None:
+def add_sensors(root: ET.Element, imu_site_name = 'imu') -> None:
     sensor_element = ET.Element("sensor")
 
     # For each actuator, add sensors
@@ -371,7 +371,7 @@ def add_sensors(root: ET.Element) -> None:
     # Add additional sensors
     imu_site = None
     for site in root.iter("site"):
-        if site.attrib.get("name") == "imu":
+        if site.attrib.get("name") == imu_site_name:
             imu_site = site
             break
 
@@ -383,7 +383,7 @@ def add_sensors(root: ET.Element) -> None:
             attrib={
                 "name": "orientation",
                 "objtype": "site",
-                "objname": "imu",
+                "objname": imu_site_name,
             },
         )
 
@@ -393,7 +393,7 @@ def add_sensors(root: ET.Element) -> None:
             "gyro",
             attrib={
                 "name": "angular-velocity",
-                "site": "imu",
+                "site": imu_site_name,
                 "cutoff": "34.9",
             },
         )
@@ -404,7 +404,7 @@ def add_sensors(root: ET.Element) -> None:
             "accelerometer",
             attrib={
                 "name": "accelerometer",
-                "site": "imu",
+                "site": imu_site_name,
             },
         )
 
@@ -414,7 +414,7 @@ def add_sensors(root: ET.Element) -> None:
             "velocimeter",
             attrib={
                 "name": "velocimeter",
-                "site": "imu",
+                "site": imu_site_name,
             },
         )
 
@@ -591,7 +591,7 @@ def convert_urdf_to_mjcf(
                         pass
 
         if verbose:
-            print('temp_urdf_path': temp_urdf_path)
+            print('temp_urdf_path', temp_urdf_path)
             os.system(f'find {temp_dir_path.resolve()}')
         urdf_tree = ET.parse(temp_urdf_path)
         for mj in urdf_tree.iter("mujoco"):
