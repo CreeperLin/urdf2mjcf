@@ -543,6 +543,7 @@ def convert_urdf_to_mjcf(
     cylinder2box: bool = False,
     use_sensor: bool = True,
     actuator_type: str = 'motor',
+    verbose: bool = True,
 ) -> None:
     """Convert a URDF file to an MJCF file.
 
@@ -579,8 +580,8 @@ def convert_urdf_to_mjcf(
                 if mesh_path is not None:
                     rel = Path(os.path.relpath(mesh_path, urdf_dir))
                     temp_mesh_path = temp_dir_path / mesh_path.name
-                    # temp_mesh_path = temp_dir_path / rel
-                    print(temp_mesh_path, mesh_path, temp_dir_path, rel, temp_mesh_path.parent.resolve())
+                    if verbose:
+                        print(temp_mesh_path, mesh_path, temp_dir_path, rel, temp_mesh_path.parent.resolve())
                     try:
                         os.makedirs(temp_mesh_path.parent, exist_ok=True)
                         temp_mesh_path.symlink_to(mesh_path)
@@ -589,14 +590,24 @@ def convert_urdf_to_mjcf(
                     except FileExistsError:
                         pass
 
-        print(temp_urdf_path)
+        if verbose:
+            print('temp_urdf_path': temp_urdf_path)
+            os.system(f'find {temp_dir_path.resolve()}')
         urdf_tree = ET.parse(temp_urdf_path)
+        for mj in urdf_tree.iter("mujoco"):
+            compiler = mj.find('compiler')
+            if compiler is None:
+                continue
+            compiler.attrib.pop('meshdir', None)
         for mesh in urdf_tree.iter("mesh"):
             full_filename = mesh.attrib.get("filename")
             if full_filename is not None:
                 mesh.attrib["filename"] = Path(full_filename).name
-            print(full_filename, Path(full_filename).name)
+            if verbose:
+                print(full_filename, Path(full_filename).name)
         urdf_tree.write(temp_urdf_path)
+        if verbose:
+            urdf_tree.write('test.urdf')
 
         # Load the URDF file with Mujoco and save it as an MJCF file in the temp directory
         temp_mjcf_path = temp_dir_path / mjcf_path.name
