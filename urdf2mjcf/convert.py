@@ -1,5 +1,6 @@
 """Uses Mujoco to convert from URDF to MJCF files."""
 
+import os
 import argparse
 import shutil
 import tempfile
@@ -167,7 +168,7 @@ def get_max_foot_distance(root: ET.Element) -> float:
     return recursive_search(worldbody)
 
 
-def add_root_body(root: ET.Element, fix_base_link=False) -> None:
+def add_root_body(root: ET.Element, fix_base_link=False, imu_site_name='imu') -> None:
     worldbody = root.find("worldbody")
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
@@ -200,7 +201,7 @@ def add_root_body(root: ET.Element, fix_base_link=False) -> None:
         root_body,
         "site",
         attrib={
-            "name": "imu",
+            "name": imu_site_name,
             "size": "0.01",
             "pos": "0 0 0",
         },
@@ -268,7 +269,7 @@ def add_worldbody_elements(root: ET.Element) -> None:
     )
 
 
-def add_actuators(root: ET.Element, no_frc_limit: bool = False) -> None:
+def add_actuators(root: ET.Element, no_frc_limit: bool = False, actuator_type='motor') -> None:
     actuator_element = ET.Element("actuator")
 
     # For each joint, add a motor actuator
@@ -286,32 +287,48 @@ def add_actuators(root: ET.Element, no_frc_limit: bool = False) -> None:
         lower_limit = limit_element.get("lower") if limit_element is not None else None
         upper_limit = limit_element.get("upper") if limit_element is not None else None
 
-        if no_frc_limit:
-            ctrlrange = "-200 200"
-        elif lower_limit is not None and upper_limit is not None:
-            ctrlrange = f"{lower_limit} {upper_limit}"
-        else:
-            actuatorfrcrange = joint.attrib.get("actuatorfrcrange")
-            ctrlrange = actuatorfrcrange if actuatorfrcrange is not None else "-1 1"
+        if actuator_type == 'motor':
+            if no_frc_limit:
+                ctrlrange = "-10000 10000"
+            elif lower_limit is not None and upper_limit is not None:
+                ctrlrange = f"{lower_limit} {upper_limit}"
+            else:
+                actuatorfrcrange = joint.attrib.get("actuatorfrcrange")
+                ctrlrange = actuatorfrcrange if actuatorfrcrange is not None else "-1 1"
 
-        ET.SubElement(
-            actuator_element,
-            "motor",
-            attrib={
-                "name": joint_name,
-                "joint": joint_name,
-                "ctrllimited": "true",
-                "ctrlrange": ctrlrange,
-                "gear": "1",
-            },
-        )
+            ET.SubElement(
+                actuator_element,
+                "motor",
+                attrib={
+                    "name": joint_name,
+                    "joint": joint_name,
+                    "ctrllimited": "true",
+                    "ctrlrange": ctrlrange,
+                    "gear": "1",
+                },
+            )
+        elif actuator_type == 'position':
+            if joint_range is None:
+                joint_range = ' '.join(map(str, [-3.14, 3.14]))
+            ctrlrange = joint_range
+
+            ET.SubElement(
+                actuator_element,
+                "position",
+                attrib={
+                    "name": joint_name,
+                    "joint": joint_name,
+                    "ctrllimited": "true",
+                    "ctrlrange": ctrlrange,
+                },
+            )
 
     if isinstance(existing_element := root.find("actuator"), ET.Element):
         root.remove(existing_element)
     root.append(actuator_element)
 
 
-def add_sensors(root: ET.Element) -> None:
+def add_sensors(root: ET.Element, imu_site_name = 'imu') -> None:
     sensor_element = ET.Element("sensor")
 
     # For each actuator, add sensors
@@ -356,7 +373,7 @@ def add_sensors(root: ET.Element) -> None:
     # Add additional sensors
     imu_site = None
     for site in root.iter("site"):
-        if site.attrib.get("name") == "imu":
+        if site.attrib.get("name") == imu_site_name:
             imu_site = site
             break
 
@@ -368,8 +385,7 @@ def add_sensors(root: ET.Element) -> None:
             attrib={
                 "name": "orientation",
                 "objtype": "site",
-                "noise": "0.001",
-                "objname": "imu",
+                "objname": imu_site_name,
             },
         )
 
@@ -379,9 +395,28 @@ def add_sensors(root: ET.Element) -> None:
             "gyro",
             attrib={
                 "name": "angular-velocity",
-                "site": "imu",
-                "noise": "0.005",
+                "site": imu_site_name,
                 "cutoff": "34.9",
+            },
+        )
+
+        # Add gyro sensor
+        ET.SubElement(
+            sensor_element,
+            "accelerometer",
+            attrib={
+                "name": "accelerometer",
+                "site": imu_site_name,
+            },
+        )
+
+        # Add gyro sensor
+        ET.SubElement(
+            sensor_element,
+            "velocimeter",
+            attrib={
+                "name": "velocimeter",
+                "site": imu_site_name,
             },
         )
 
@@ -509,6 +544,9 @@ def convert_urdf_to_mjcf(
     fix_base_link: bool = False,
     cylinder2box: bool = False,
     use_sensor: bool = True,
+    actuator_type: str = 'motor',
+    verbose: bool = True,
+    dump: bool = False,
 ) -> None:
     """Convert a URDF file to an MJCF file.
 
@@ -530,6 +568,8 @@ def convert_urdf_to_mjcf(
         raise FileNotFoundError(f"URDF file not found: {urdf_path}")
     mjcf_path.parent.mkdir(parents=True, exist_ok=True)
 
+    visual_mesh_paths = []
+    collision_mesh_paths = []
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir_path = Path(temp_dir)
 
@@ -541,28 +581,69 @@ def convert_urdf_to_mjcf(
         # Copy mesh files to temp directory and potentially to output directory
         mesh_files = []
         for (_, visual_mesh_path), (_, collision_mesh_path) in iter_meshes(urdf_path):
+            if visual_mesh_path is not None:
+                visual_mesh_paths.append(visual_mesh_path)
+            if collision_mesh_path is not None:
+                collision_mesh_paths.append(collision_mesh_path)
             for mesh_path in list({visual_mesh_path, collision_mesh_path}):
                 if mesh_path is not None:
+                    rel = Path(os.path.relpath(mesh_path, urdf_dir))
                     temp_mesh_path = temp_dir_path / mesh_path.name
+                    if verbose:
+                        print(temp_mesh_path, mesh_path, temp_dir_path, rel, temp_mesh_path.parent.resolve())
                     try:
+                        os.makedirs(temp_mesh_path.parent, exist_ok=True)
                         temp_mesh_path.symlink_to(mesh_path)
                         if copy_meshes:
-                            import os
-                            rel = Path(os.path.relpath(mesh_path, urdf_dir))
                             mesh_files.append(rel)
                     except FileExistsError:
                         pass
 
+        if verbose:
+            print('temp_urdf_path', temp_urdf_path)
+            os.system(f'find {temp_dir_path.resolve()}')
         urdf_tree = ET.parse(temp_urdf_path)
+        compiler = None
+        mj = None
+        for mj in urdf_tree.iter("mujoco"):
+            compiler = mj.find('compiler')
+            if compiler is None:
+                continue
+            compiler.attrib.pop('meshdir', None)
+        robot = urdf_tree.getroot()
+        assert robot is not None
+        if mj is None:
+            mj = ET.SubElement(
+                robot,
+                "mujoco",
+                attrib={},
+            )
+        if compiler is None:
+            compiler = ET.SubElement(
+                # robot,
+                mj,
+                "compiler",
+                attrib={},
+            )
+        # compiler.attrib['discardvisual'] = "false"
+        compiler.attrib['discardvisual'] = "true"
+        compiler.attrib['fusestatic'] = "false"
         for mesh in urdf_tree.iter("mesh"):
             full_filename = mesh.attrib.get("filename")
             if full_filename is not None:
                 mesh.attrib["filename"] = Path(full_filename).name
+            if verbose:
+                print(full_filename, Path(full_filename).name)
+        urdf_tree.write(temp_urdf_path)
+        if dump:
+            urdf_tree.write('test.urdf')
 
         # Load the URDF file with Mujoco and save it as an MJCF file in the temp directory
         temp_mjcf_path = temp_dir_path / mjcf_path.name
         model = mujoco.MjModel.from_xml_path(temp_urdf_path.as_posix())
         mujoco.mj_saveLastXML(temp_mjcf_path.as_posix(), model)
+        if dump:
+            mujoco.mj_saveLastXML('temp.xml', model)
 
         # Read the MJCF file and update the paths to the meshes
         mjcf_tree = ET.parse(temp_mjcf_path)
@@ -609,7 +690,7 @@ def convert_urdf_to_mjcf(
         add_cameras(root, distance=camera_distance, height_offset=camera_height_offset)
         add_root_body(root, fix_base_link=fix_base_link)
         add_worldbody_elements(root)
-        add_actuators(root, no_frc_limit)
+        add_actuators(root, no_frc_limit, actuator_type)
         if use_sensor:
             add_sensors(root)
         add_visual_geom_logic(root)
@@ -623,7 +704,7 @@ def convert_urdf_to_mjcf(
                 mjcf_mesh_path = mjcf_path.parent.resolve() / 'meshes' / mjcf_mesh_file
                 mjcf_mesh_path.parent.mkdir(parents=True, exist_ok=True)
                 urdf_mesh_path = urdf_dir / mesh_file
-                if mjcf_mesh_path != urdf_mesh_path:
+                if mjcf_mesh_path.resolve() != urdf_mesh_path.resolve():
                     shutil.copy2(urdf_mesh_path, mjcf_mesh_path)
 
         # Write the updated MJCF file to the original destination
